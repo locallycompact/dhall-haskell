@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedLists   #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -53,8 +54,11 @@ import qualified Dhall.Util                  as Util
 import qualified Prettyprinter.Render.String as Pretty
 import qualified System.Directory            as Directory
 import qualified System.FilePath             as FilePath
-import qualified System.Posix.User           as Posix
 import qualified System.PosixCompat.Files    as Posix
+
+#ifdef MIN_VERSION_unix
+import qualified System.Posix.User           as Posix.User
+#endif
 
 {-| Attempt to transform a Dhall record into a directory tree where:
 
@@ -262,12 +266,24 @@ makeType = Record . Map.fromList <$> sequenceA
 -- | Resolve a `User` to a numerical id.
 getUser :: User -> IO UserID
 getUser (UserId uid) = return uid
-getUser (UserName name) = Posix.userID <$> Posix.getUserEntryForName name
+#ifdef MIN_VERSION_unix
+getUser (UserName name) =
+    Posix.User.userID <$> Posix.User.getUserEntryForName name
+#else
+getUser (UserName _name) =
+    Exception.throwIO MetadataUnsupportedError
+#endif
 
 -- | Resolve a `Group` to a numerical id.
 getGroup :: Group -> IO GroupID
 getGroup (GroupId gid) = return gid
-getGroup (GroupName name) = Posix.groupID <$> Posix.getGroupEntryForName name
+#ifdef MIN_VERSION_unix
+getGroup (GroupName name) =
+    Posix.User.groupID <$> Posix.User.getGroupEntryForName name
+#else
+getGroup (GroupName _name) =
+    Exception.throwIO MetadataUnsupportedError
+#endif
 
 -- | Process a `FilesystemEntry`. Writes the content to disk and apply the
 -- metadata to the newly created item.
@@ -378,62 +394,81 @@ hasFileMode mode x = (mode `Posix.intersectFileModes` x) == x
 newtype FilesystemError =
     FilesystemError { unexpectedExpression :: Expr Void Void }
 
+instance Exception FilesystemError
+
 instance Show FilesystemError where
     show FilesystemError{..} =
         Pretty.renderString (Dhall.Pretty.layout message)
       where
         message =
-          Util._ERROR <> ": Not a valid directory tree expression                             \n\
-          \                                                                                   \n\
-          \Explanation: Only a subset of Dhall expressions can be converted to a directory    \n\
-          \tree.  Specifically, record literals or maps can be converted to directories,      \n\
-          \❰Text❱ literals can be converted to files, and ❰Optional❱ values are included if   \n\
-          \❰Some❱ and omitted if ❰None❱.  Values of union types can also be converted if      \n\
-          \they are an alternative which has a non-nullary constructor whose argument is of   \n\
-          \an otherwise convertible type.  Furthermore, there is a more advanced approach to  \n\
-          \constructing a directory tree utilizing a fixpoint encoding. Consult the upstream  \n\
-          \documentation of the `toDirectoryTree` function in the Dhall.Directory module for  \n\
-          \further information on that.                                                       \n\
-          \No other type of value can be translated to a directory tree.                      \n\
-          \                                                                                   \n\
-          \For example, this is a valid expression that can be translated to a directory      \n\
-          \tree:                                                                              \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \    ┌──────────────────────────────────┐                                           \n\
-          \    │ { `example.json` = \"[1, true]\" } │                                         \n\
-          \    └──────────────────────────────────┘                                           \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \In contrast, the following expression is not allowed due to containing a           \n\
-          \❰Natural❱ field, which cannot be translated in this way:                           \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \    ┌───────────────────────┐                                                      \n\
-          \    │ { `example.txt` = 1 } │                                                      \n\
-          \    └───────────────────────┘                                                      \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \Note that key names cannot contain path separators:                                \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \    ┌─────────────────────────────────────┐                                        \n\
-          \    │ { `directory/example.txt` = \"ABC\" } │ Invalid: Key contains a forward slash\n\
-          \    └─────────────────────────────────────┘                                        \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \Instead, you need to refactor the expression to use nested records instead:        \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \    ┌───────────────────────────────────────────┐                                  \n\
-          \    │ { directory = { `example.txt` = \"ABC\" } } │                                \n\
-          \    └───────────────────────────────────────────┘                                  \n\
-          \                                                                                   \n\
-          \                                                                                   \n\
-          \You tried to translate the following expression to a directory tree:               \n\
-          \                                                                                   \n\
-          \" <> Util.insert unexpectedExpression <> "\n\
-          \                                                                                   \n\
-          \... which is not an expression that can be translated to a directory tree.         \n"
+          (   Util._ERROR <> ": Not a valid directory tree expression                             \n"
+          <>  "                                                                                   \n"
+          <>  "Explanation: Only a subset of Dhall expressions can be converted to a directory    \n"
+          <>  "tree.  Specifically, record literals or maps can be converted to directories,      \n"
+          <>  "❰Text❱ literals can be converted to files, and ❰Optional❱ values are included if   \n"
+          <>  "❰Some❱ and omitted if ❰None❱.  Values of union types can also be converted if      \n"
+          <>  "they are an alternative which has a non-nullary constructor whose argument is of   \n"
+          <>  "an otherwise convertible type.  Furthermore, there is a more advanced approach to  \n"
+          <>  "constructing a directory tree utilizing a fixpoint encoding. Consult the upstream  \n"
+          <>  "documentation of the `toDirectoryTree` function in the Dhall.Directory module for  \n"
+          <>  "further information on that.                                                       \n"
+          <>  "No other type of value can be translated to a directory tree.                      \n"
+          <>  "                                                                                   \n"
+          <>  "For example, this is a valid expression that can be translated to a directory      \n"
+          <>  "tree:                                                                              \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "    ┌──────────────────────────────────┐                                           \n"
+          <>  "    │ { `example.json` = \"[1, true]\" } │                                         \n"
+          <>  "    └──────────────────────────────────┘                                           \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "In contrast, the following expression is not allowed due to containing a           \n"
+          <>  "❰Natural❱ field, which cannot be translated in this way:                           \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "    ┌───────────────────────┐                                                      \n"
+          <>  "    │ { `example.txt` = 1 } │                                                      \n"
+          <>  "    └───────────────────────┘                                                      \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "Note that key names cannot contain path separators:                                \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "    ┌─────────────────────────────────────┐                                        \n"
+          <>  "    │ { `directory/example.txt` = \"ABC\" } │ Invalid: Key contains a forward slash\n"
+          <>  "    └─────────────────────────────────────┘                                        \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "Instead, you need to refactor the expression to use nested records instead:        \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "    ┌───────────────────────────────────────────┐                                  \n"
+          <>  "    │ { directory = { `example.txt` = \"ABC\" } } │                                \n"
+          <>  "    └───────────────────────────────────────────┘                                  \n"
+          <>  "                                                                                   \n"
+          <>  "                                                                                   \n"
+          <>  "You tried to translate the following expression to a directory tree:               \n"
+          <>  "                                                                                   \n"
+          <>  Util.insert unexpectedExpression <> "\n"
+          <>  "                                                                                   \n"
+          <>  "... which is not an expression that can be translated to a directory tree.         \n"
+          )
 
-instance Exception FilesystemError
+{- | This error indicates that you want to set some metadata for a file or
+     directory, but that operation is not supported  on your platform.
+-}
+data MetadataUnsupportedError = MetadataUnsupportedError
+
+instance Exception MetadataUnsupportedError
+
+instance Show MetadataUnsupportedError where
+    show MetadataUnsupportedError =
+        Pretty.renderString (Dhall.Pretty.layout message)
+      where
+        message =
+          (   Util._ERROR <> ": Setting metadata is not supported on this platform.               \n"
+          <>  "                                                                                   \n"
+          <>  "Explanation: Your Dhall expression indicates that you intend to set some metadata  \n"
+          <>  "like ownership or permissions, which is not supported on your platform."
+          )
